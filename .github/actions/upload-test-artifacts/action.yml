@@ -1,19 +1,17 @@
 # Composite action to upload test artifacts (JUnit XML) to GitHub Actions.
 name: Upload test artifacts
+description: "Upload test artifacts to GCS"
 
 inputs:
   test-artifacts-dir:
     description: "Directory containing test artifact files"
     default: 'test-artifacts'
-    type: string
   artifact-name:
     description: "Name for the GitHub Actions artifact upload"
     default: 'test-artifacts-${{ github.job }}'
-    type: string
   gcs-upload-uri:
     description: "GCS location prefix where the test artifacts should be uploaded"
     default: 'gs://general-ml-ci-transient/jax-github-actions/jax/${{ github.workflow }}/${{ github.run_number }}/${{ github.run_attempt }}'
-    type: string
 
 runs:
   using: "composite"
