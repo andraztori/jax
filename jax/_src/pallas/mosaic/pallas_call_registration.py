@@ -459,6 +459,7 @@ def mpmd_map_tpu_lowering_rule(
         "mpmd_map does not support dimension_semantics= in compiler_params="
     )
 
+  mpmd_meshes_map = {mesh.kernel_type: mesh for mesh in meshes}
   jax_mesh = None
   axis_context = ctx.module_context.axis_context
   if axis_context is not None:
@@ -485,12 +486,16 @@ def mpmd_map_tpu_lowering_rule(
 
       match kernel_type := mesh.kernel_type:
         case tpu_core.CoreType.TC:
+          if (mpmd_meshes_map is not None
+              and mpmd_meshes_map.keys() != {tpu_core.CoreType.TC}):
+            raise NotImplementedError("MMPD does not support TC kernels yet.")
           lower_jaxpr_into_module = lowering.lower_jaxpr_into_module
         case (
             tpu_core.CoreType.SC_SCALAR_SUBCORE
             | tpu_core.CoreType.SC_VECTOR_SUBCORE
         ):
-          lower_jaxpr_into_module = sc_lowering.lower_jaxpr_into_module
+          lower_jaxpr_into_module = functools.partial(
+            sc_lowering.lower_jaxpr_into_module, mpmd_meshes=mpmd_meshes_map)
         case _:
           raise ValueError(
               f"Unsupported kernel type: {mosaic_params.kernel_type}"

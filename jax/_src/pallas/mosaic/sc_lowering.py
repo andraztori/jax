@@ -17,7 +17,7 @@ from collections.abc import Sequence
 import dataclasses
 import functools
 import itertools
-from typing import Any, Callable, cast, NoReturn
+from typing import Any, Callable, cast, NoReturn, Mapping
 
 from jax._src import api_util
 from jax._src import core as jax_core
@@ -361,6 +361,7 @@ def lower_jaxpr_into_module(
     kernel_type: tpu_core.CoreType,
     mesh: mesh_lib.Mesh | None = None,
     dynamic_shape_replacement_enabled: bool = False,
+    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh] | None = None,
 ):
   """Lowers a Jaxpr to a Mosaic SparseCore module."""
   if dynamic_shape_replacement_enabled:
@@ -384,6 +385,7 @@ def lower_jaxpr_into_module(
       mosaic_grid_mapping=mosaic_grid_mapping,
       forward_compatible=lowering_context.is_forward_compat(),
       backend=backend,
+      mpmd_meshes=mpmd_meshes,
   )
   module.body.append(func_op)
   sym_tab.insert(func_op)
@@ -464,6 +466,7 @@ def lower_jaxpr_to_func(
     mosaic_grid_mapping: MosaicGridMapping,
     forward_compatible: bool,
     backend: Any | None,
+    mpmd_meshes: Mapping[tpu_core.CoreType, pallas_core.Mesh] | None = None,
 ) -> func.FuncOp:
   """Lowers a Jaxpr to a Mosaic SparseCore function."""
   num_grid = len(mosaic_grid_mapping.grid_types)
@@ -502,12 +505,13 @@ def lower_jaxpr_to_func(
         jaxpr_indices,
         arg_block_shapes,
         source_info_util.NameStack(),
-        mesh_context=mosaic_grid_mapping.mesh_info,
+        jax_mesh_context=mosaic_grid_mapping.mesh_info,
         traceback_caches=mlir.TracebackCaches(),
         kernel_type=kernel_type,
         forward_compatible=forward_compatible,
         backend=backend,
         dynamic_shape_replacement_fn=dynamic_shape_replacement_fn,
+        mpmd_meshes=mpmd_meshes,
     )
     return tc_lowering.jaxpr_subcomp(
           lowering_context, jaxpr, *scalar_prefetch, *operands_and_scratch

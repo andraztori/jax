@@ -195,6 +195,18 @@ class ScalarSubcoreMesh:
     del effect  # Unused.
     return False
 
+  def check_is_compatible_with(self, other_mesh):
+    if isinstance(other_mesh, ScalarSubcoreMesh):
+      raise ValueError("You can't use two different ScalarSubcoreMeshes.")
+    elif isinstance(other_mesh, VectorSubcoreMesh):
+      if (self.axis_name == other_mesh.core_axis_name
+          and self.num_cores == other_mesh.num_cores):
+        return True
+      raise ValueError(f"{self} should have the same core axis name and number"
+                       f" of cores as the VectorSubcoreMesh {other_mesh}.")
+    elif isinstance(other_mesh, tpu_core.TensorCoreMesh):
+      pass  # TODO: Add support for mpmd with the TensorCore mesh.
+    return pallas_core.Mesh.check_is_compatible_with(self, other_mesh)
 
 def _scalar_subcore_mesh_discharge_rule(
     in_avals,
@@ -295,6 +307,19 @@ class VectorSubcoreMesh:
   def discharges_effect(self, effect):
     del effect  # Unused.
     return False
+
+  def check_is_compatible_with(self, other_mesh):
+    if isinstance(other_mesh, VectorSubcoreMesh):
+      raise ValueError("You can't use two different VectorSubcoreMeshes.")
+    elif isinstance(other_mesh, ScalarSubcoreMesh):
+      if (other_mesh.axis_name == self.core_axis_name
+          and other_mesh.num_cores == self.num_cores):
+        return True
+      raise ValueError(f"{self} should have the same core axis name and number"
+                       f" of cores as the ScalarSubcoreMesh {other_mesh}.")
+    elif isinstance(other_mesh, tpu_core.TensorCoreMesh):
+      pass  # TODO: Add support for mpmd with the TensorCore mesh.
+    return pallas_core.Mesh.check_is_compatible_with(self, other_mesh)
 
 
 def _vector_subcore_mesh_discharge_rule(

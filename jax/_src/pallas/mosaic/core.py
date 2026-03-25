@@ -211,6 +211,8 @@ class MemorySpace(enum.Enum):
     return self.name
 
   def from_type(self, ty):
+    if self is MemorySpace.VMEM_SHARED:
+      return CoreMemorySpace(self, CoreType.SC_VECTOR_SUBCORE).from_type(ty)
     return MemoryRef(ty, memory_space=self)
 
   def __call__(self, shape: Sequence[int], dtype: jnp.dtype[Any]):
@@ -238,14 +240,19 @@ class CoreMemorySpace:
         ...
       case MemorySpace.CMEM, CoreType.TC:
         ...
+      case MemorySpace.VMEM_SHARED, CoreType.SC_VECTOR_SUBCORE:
+        ...
       case _, _:
         raise ValueError(
             "Unsupported core memory space:"
             f" {self.memory_space, self.core_type}"
         )
 
+  def from_type(self, ty):
+    return MemoryRef(ty, memory_space=self)
+
   def __call__(self, shape: Sequence[int], dtype: jnp.dtype[Any]):
-    return MemoryRef(jax_core.ShapedArray(tuple(shape), dtype), self)
+    return self.from_type(jax_core.ShapedArray(tuple(shape), dtype))
 
   def __str__(self) -> str:
     return f"{self.memory_space}@{self.core_type}"
@@ -361,6 +368,12 @@ class TensorCoreMesh:
   def discharges_effect(self, effect: jax_core.Effect) -> Literal[False]:
     del effect
     return False
+
+  def check_is_compatible_with(self, other_mesh):
+    if isinstance(other_mesh, TensorCoreMesh):
+      raise ValueError("You can't use two different TensorCoreMeshes.")
+    # TODO: Add support for mpmd with SparseCore meshes.
+    return pallas_core.Mesh.check_is_compatible_with(self, other_mesh)
 
 
 def create_tensorcore_mesh(
