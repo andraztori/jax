@@ -114,11 +114,7 @@ bazel $bazel_output_base $JAXCI_BAZEL_CPU_RBE_MODE \
     --remote_download_regex='.*test\.xml$' \
     --color=yes \
     -- \
-    //tests:cpu_tests //tests:backend_independent_tests \
-    //jax/experimental/jax2tf/tests:jax2tf_test_cpu \
-    //tests/multiprocess:cpu_tests \
-    //jax/experimental/jax2tf/tests/multiprocess:cpu_tests \
-    //jaxlib/tools:check_cpu_wheel_sources_test \
+    //tests:cpu_tests
     $IGNORE_TESTS || bazel_retval=$?
 
 ci/utilities/collect_bazel_test_xmls.sh test-artifacts
