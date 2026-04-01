@@ -274,6 +274,23 @@ cc_library(
 cc_library(
     name = "custom_call",
     srcs = ["custom_call.cc"],
+    defines = if_oss(
+        select({
+            "@xla//xla/tsl:linux_aarch64": [
+                "XLA_LLVM_AARCH64_AVAILABLE=1",
+            ],
+            "//conditions:default": [],
+        }) + select({
+            "@xla//xla/tsl:linux_x86_64": [
+                "XLA_LLVM_X86_AVAILABLE=1",
+            ],
+            "//conditions:default": [],
+        }),
+        [
+            "XLA_LLVM_AARCH64_AVAILABLE=1",
+            "XLA_LLVM_X86_AVAILABLE=1",
+        ],
+    ),
     linkopts = if_oss(
         [],  # We use a version script to ensure symbol visibility in the OSS build.
         [
