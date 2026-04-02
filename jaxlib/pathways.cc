@@ -107,6 +107,70 @@ absl::Status PopulateSubmeshOffsets(absl::Span<const int> axis_sizes,
   }
 }
 
+// Returns a list of offsets for each submesh within the global mesh.
+// These offsets are used to map local shard indices to global mesh indices.
+absl::StatusOr<std::vector<int>> GetSubmeshOffsets(
+    int mesh_axis_idx, absl::Span<const int> mesh_axis_sizes,
+    absl::Span<const int> strides) {
+  std::vector<int> submesh_offsets;
+  if (mesh_axis_idx == 0) {
+    submesh_offsets.push_back(0);
+  } else {
+    std::vector<int> current_entry(mesh_axis_idx, 0);
+    TF_RETURN_IF_ERROR(PopulateSubmeshOffsets(
+        mesh_axis_sizes.subspan(0, mesh_axis_idx),
+        absl::MakeSpan(current_entry), strides, submesh_offsets));
+  }
+  return submesh_offsets;
+}
+
+// Generates symmetric intervals for RemapPlan::Mapping.
+// `derived_target` receives intervals calculated from submesh offsets.
+// `contiguous_target` receives linearly incrementing intervals starting from 0.
+// For split: pass `mapping.from` as `derived_target` and `mapping.to` as
+// `contiguous_target`.
+// For concatenate: pass `mapping.to` as `derived_target` and `mapping.from`
+// as `contiguous_target`.
+void PopulateRemapMappings(
+    std::vector<xla::ifrt::RemapPlan::Interval>& derived_target,
+    std::vector<xla::ifrt::RemapPlan::Interval>& contiguous_target,
+    absl::Span<const int> submesh_offsets, int submesh_axis_size,
+    absl::Span<const int> strides, int mesh_axis_idx, int submesh_axis_start) {
+  int incrementing_offset = 0;
+  for (const auto& submesh_offset : submesh_offsets) {
+    int num_contiguous_shards = submesh_axis_size * strides[mesh_axis_idx];
+    int calculated_offset =
+        submesh_offset + submesh_axis_start * strides[mesh_axis_idx];
+
+    derived_target.push_back(xla::ifrt::RemapPlan::Interval{
+        calculated_offset, calculated_offset + num_contiguous_shards, 1});
+    contiguous_target.push_back(xla::ifrt::RemapPlan::Interval{
+        incrementing_offset, incrementing_offset + num_contiguous_shards, 1});
+
+    incrementing_offset += num_contiguous_shards;
+  }
+}
+
+xla::ifrt::Shape GetShardShape(const PyArray& py_array) {
+  DCHECK(PyGILState_Check());
+  const auto& py_aval = py_array.aval();
+  auto py_shape = py_aval.attr("shape");
+  auto py_shard_shape = py_array.sharding().attr("shard_shape")(py_shape);
+  auto dims = nanobind::cast<std::vector<int64_t>>(py_shard_shape);
+  return xla::ifrt::Shape(
+      xla::ifrt::Shape::Dimensions(dims.begin(), dims.end()));
+}
+
+std::vector<xla::ifrt::Shape> GetShardShapes(
+    absl::Span<const PyArray> py_arrays) {
+  std::vector<xla::ifrt::Shape> shard_shapes;
+  shard_shapes.reserve(py_arrays.size());
+  for (const PyArray& py_array : py_arrays) {
+    shard_shapes.push_back(GetShardShape(py_array));
+  }
+  return shard_shapes;
+}
+
 // If `backend` is nullptr, sets it to `array.py_client()`; otherwise checks
 // that `backend` equals `array.py_client()`.
 absl::Status PyClientFromPyArray(const PyArray& array,
@@ -255,15 +319,9 @@ ExperimentalSplitByMeshAxis(
   auto& mappings = *remap_plan.mappings;
 
   TF_ASSIGN_OR_RETURN(std::vector<int> strides, GetStrides(mesh_axis_sizes));
-  std::vector<int> submesh_offsets;
-  if (mesh_axis_idx == 0) {
-    submesh_offsets.push_back(0);
-  } else {
-    std::vector<int> current_entry(mesh_axis_idx, 0);
-    TF_RETURN_IF_ERROR(PopulateSubmeshOffsets(
-        mesh_axis_sizes.subspan(0, mesh_axis_idx),
-        absl::MakeSpan(current_entry), strides, submesh_offsets));
-  }
+  TF_ASSIGN_OR_RETURN(
+      std::vector<int> submesh_offsets,
+      GetSubmeshOffsets(mesh_axis_idx, mesh_axis_sizes, strides));
 
   nb_class_ptr<PyClient> backend;
   std::vector<xla::ifrt::ArrayRef> input_ifrt_arrays;
@@ -291,17 +349,9 @@ ExperimentalSplitByMeshAxis(
         submesh_axis_size -= mesh_axis_sections[submesh_idx - 1];
         submesh_axis_start = mesh_axis_sections[submesh_idx - 1];
       }
-      int offset_to_array = 0;
-      for (const auto& submesh_offset : submesh_offsets) {
-        int num_contiguous_shards = submesh_axis_size * strides[mesh_axis_idx];
-        int offset_from_array =
-            submesh_offset + submesh_axis_start * strides[mesh_axis_idx];
-        mapping.from.push_back(xla::ifrt::RemapPlan::Interval{
-            offset_from_array, offset_from_array + num_contiguous_shards, 1});
-        mapping.to.push_back(xla::ifrt::RemapPlan::Interval{
-            offset_to_array, offset_to_array + num_contiguous_shards, 1});
-        offset_to_array += num_contiguous_shards;
-      }
+      PopulateRemapMappings(mapping.from, mapping.to, submesh_offsets,
+                            submesh_axis_size, strides, mesh_axis_idx,
+                            submesh_axis_start);
       if (sharded_dim_idxs[array_idx] >= 0) {
         std::vector<int64_t> dims(array->shape().dims().begin(),
                                   array->shape().dims().end());
@@ -368,6 +418,175 @@ ExperimentalSplitByMeshAxis(
   return py_results;
 }
 
+absl::StatusOr<std::vector<nb::object>> ExperimentalConcatenateByMeshAxis(
+    nb::object py_arrays_py, absl::Span<const int> sharded_dim_idxs,
+    absl::Span<const int> mesh_axis_sizes, int mesh_axis_idx,
+    absl::Span<const int> mesh_axis_sections,
+    absl::Span<const nb::object> out_shardings, bool donate) {
+  DCHECK(PyGILState_Check());
+
+  auto py_arrays_list =
+      nb::cast<std::vector<std::vector<PyArray>>>(py_arrays_py);
+  if (py_arrays_list.empty()) {
+    return std::vector<nb::object>();
+  }
+  int num_output_arrays = py_arrays_list.size();
+  int num_input_arrays_per_output = py_arrays_list[0].size();
+
+  if (sharded_dim_idxs.size() != num_output_arrays) {
+    return absl::InvalidArgumentError("sharded_dim_idxs size mismatch");
+  }
+  if (out_shardings.size() != num_output_arrays) {
+    return absl::InvalidArgumentError("out_shardings size mismatch");
+  }
+
+  for (const auto& py_arrays : py_arrays_list) {
+    if (py_arrays.size() != num_input_arrays_per_output) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "`ConcatenateByMeshAxis` expects all output arrays to have the same ",
+          "number of input arrays.  Saw ", py_arrays.size(), " vs ",
+          num_input_arrays_per_output, "."));
+    }
+    std::vector<xla::ifrt::Shape> shard_shapes = GetShardShapes(py_arrays);
+    for (int idx = 1; idx < shard_shapes.size(); ++idx) {
+      if (shard_shapes[idx] != shard_shapes[0]) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "`ConcatenateByMeshAxis` expects all input arrays for a given ",
+            "output to have the same shard shape. Input array #",
+            idx, " has shard shape ", shard_shapes[idx],
+            ", which differs from shard shape of arrays with ",
+            "smaller indices ",
+            shard_shapes[0]));
+      }
+    }
+  }
+
+  TF_ASSIGN_OR_RETURN(std::vector<int> strides, GetStrides(mesh_axis_sizes));
+  std::vector<int> submesh_offsets;
+  if (mesh_axis_idx == 0) {
+    submesh_offsets.push_back(0);
+  } else {
+    std::vector<int> current_entry(mesh_axis_idx, 0);
+    TF_RETURN_IF_ERROR(PopulateSubmeshOffsets(
+        mesh_axis_sizes.subspan(0, mesh_axis_idx),
+        absl::MakeSpan(current_entry), strides, submesh_offsets));
+  }
+
+  xla::ifrt::RemapPlan remap_plan;
+  remap_plan.mappings =
+      std::make_shared<std::vector<xla::ifrt::RemapPlan::Mapping>>();
+  auto& mappings = *remap_plan.mappings;
+
+  std::vector<xla::ifrt::ArrayRef> input_ifrt_arrays;
+  input_ifrt_arrays.reserve(num_output_arrays * num_input_arrays_per_output);
+
+  nb_class_ptr<PyClient> backend;
+  TF_RETURN_IF_ERROR(PyClientFromPyArray(py_arrays_list[0][0], backend));
+
+  for (int array_idx = 0; array_idx < num_output_arrays; ++array_idx) {
+    const auto& py_arrays = py_arrays_list[array_idx];
+    if (py_arrays.size() != num_input_arrays_per_output) {
+      return absl::InvalidArgumentError("Inconsistent number of input arrays");
+    }
+
+    int64_t concatenated_sharded_dim_size = 0;
+    for (int input_idx = 0; input_idx < num_input_arrays_per_output;
+         ++input_idx) {
+      const PyArray& py_array = py_arrays[input_idx];
+      xla::ifrt::Array* array = py_array.ifrt_array();
+      if (array == nullptr) {
+        return xla::InvalidArgument(
+            "Input array #%d for output #%d has been donated or deleted",
+            input_idx, array_idx);
+      }
+
+      if (sharded_dim_idxs[array_idx] >= 0) {
+        concatenated_sharded_dim_size +=
+            array->shape().dims()[sharded_dim_idxs[array_idx]];
+      }
+
+      auto& mapping = mappings.emplace_back();
+      mapping.in_array = remap_plan.input_specs.size();
+      mapping.out_array = array_idx;
+      int submesh_axis_size = mesh_axis_sections[input_idx];
+      int submesh_axis_start = 0;
+      if (input_idx > 0) {
+        submesh_axis_size -= mesh_axis_sections[input_idx - 1];
+        submesh_axis_start = mesh_axis_sections[input_idx - 1];
+      }
+      int offset_from_array = 0;
+      for (const auto& submesh_offset : submesh_offsets) {
+        int num_contiguous_shards = submesh_axis_size * strides[mesh_axis_idx];
+        int offset_to_array =
+            submesh_offset + submesh_axis_start * strides[mesh_axis_idx];
+        mapping.from.push_back(xla::ifrt::RemapPlan::Interval{
+            offset_from_array, offset_from_array + num_contiguous_shards, 1});
+        mapping.to.push_back(xla::ifrt::RemapPlan::Interval{
+            offset_to_array, offset_to_array + num_contiguous_shards, 1});
+        offset_from_array += num_contiguous_shards;
+      }
+      remap_plan.input_specs.push_back(
+          xla::ifrt::ArraySpec{.dtype = array->dtype(),
+                               .shape = array->shape(),
+                               .sharding = array->shared_ptr_sharding()});
+      input_ifrt_arrays.push_back(tsl::FormRef(array));
+    }
+
+    xla::ifrt::Array* first_array = py_arrays[0].ifrt_array();
+    if (sharded_dim_idxs[array_idx] < 0) {
+      TF_ASSIGN_OR_RETURN(
+          auto ifrt_sharding,
+          GetIfrtHloSharding(out_shardings[array_idx], first_array->shape()));
+      remap_plan.output_specs.push_back(
+          xla::ifrt::ArraySpec{.dtype = first_array->dtype(),
+                               .shape = first_array->shape(),
+                               .sharding = std::move(ifrt_sharding)});
+    } else {
+      std::vector<int64_t> concatenated_dims(
+          first_array->shape().dims().begin(),
+          first_array->shape().dims().end());
+      concatenated_dims[sharded_dim_idxs[array_idx]] =
+          concatenated_sharded_dim_size;
+      xla::ifrt::Shape concatenated_shape = xla::ifrt::Shape(concatenated_dims);
+      TF_ASSIGN_OR_RETURN(
+          auto ifrt_sharding,
+          GetIfrtHloSharding(out_shardings[array_idx], concatenated_shape));
+      remap_plan.output_specs.push_back(
+          xla::ifrt::ArraySpec{.dtype = first_array->dtype(),
+                               .shape = std::move(concatenated_shape),
+                               .sharding = std::move(ifrt_sharding)});
+    }
+  }
+
+  PyUserContextScope user_context_scope;
+  std::vector<xla::ifrt::ArrayRef> result_ifrt_arrays;
+  {
+    nb::gil_scoped_release gil_release;
+    DCHECK_OK(remap_plan.Validate());
+
+    TF_ASSIGN_OR_RETURN(
+        result_ifrt_arrays,
+        backend->ifrt_client()->RemapArrays(
+            remap_plan, absl::MakeSpan(input_ifrt_arrays),
+            donate ? xla::ifrt::ArrayCopySemantics::kDonateInput
+                   : xla::ifrt::ArrayCopySemantics::kReuseInput));
+    DCHECK_EQ(result_ifrt_arrays.size(), num_output_arrays);
+  }
+
+  std::vector<nb::object> py_results;
+  py_results.reserve(num_output_arrays);
+  for (int array_idx = 0; array_idx < num_output_arrays; ++array_idx) {
+    const auto& py_array_template = py_arrays_list[array_idx][0];
+    PyArray new_py_array = PyArray::MakeFromIfrtArrayAndSharding(
+        backend, std::move(result_ifrt_arrays[array_idx]),
+        out_shardings[array_idx], py_array_template.weak_type(),
+        /*committed=*/true,
+        /*skip_checks=*/true);
+    py_results.push_back(std::move(new_py_array));
+  }
+  return py_results;
+}
+
 jax::nb_class_ptr<jax::PyClient> CreateCpuClient(
     absl::flat_hash_set<int> addressable_devices,
     absl::flat_hash_map<int, int> device_id_to_process_index) {
@@ -406,6 +625,12 @@ NB_MODULE(_pathways, m) {
         nb::arg("arrays"), nb::arg("sharded_dim_idxs"),
         nb::arg("mesh_axis_sizes"), nb::arg("mesh_axis_idx"),
         nb::arg("mesh_axis_sections"), nb::arg("submesh_shardings"),
+        nb::arg("donate"));
+  m.def("_concatenate_by_mesh_axis",
+        xla::ValueOrThrowWrapper(ExperimentalConcatenateByMeshAxis),
+        nb::arg("arrays"), nb::arg("sharded_dim_idxs"),
+        nb::arg("mesh_axis_sizes"), nb::arg("mesh_axis_idx"),
+        nb::arg("mesh_axis_sections"), nb::arg("out_shardings"),
         nb::arg("donate"));
   m.def("_create_cpu_client", CreateCpuClient, nb::arg("addressable_devices"),
         nb::arg("device_id_to_process_index"),
