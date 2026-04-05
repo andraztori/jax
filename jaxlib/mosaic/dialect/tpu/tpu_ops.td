@@ -706,10 +706,11 @@ def TPU_UnpackSubelementsOp : TPU_Op<"unpack_subelements", [Pure]> {
 //
 //                          Interleaved packing
 //
-// Interleaved packing downcasts to a narrower dtype, and packs multiple elements
-// into the same word coordinate from which they originated. If a and b are packed
-// values, then interleaved packing first iterates over the operand list and only
-// then over the subelements within each word.
+// Interleaved packing downcasts each value and interleaves the subelement
+// dimension of the sources.
+//
+// result[..., idx] = sources[idx % num_sources][..., idx / num_sources]
+//
 // Take 16-bit vregs A, B, C and D:
 ///
 //   [ (A000 A001) (A010 A011) ... ]
@@ -729,7 +730,20 @@ def TPU_UnpackSubelementsOp : TPU_Op<"unpack_subelements", [Pure]> {
 //
 //                          Compressed packing
 //
-// Compressed packing downcasts each value and then packs multiple rows together.
+// Compressed packing downcasts each value and concatenates the combined sublane
+// and subelement dimensions (the "row" dimension) of the sources.
+//
+// compressed_result[row_idx, ...]
+//   = compressed_sources[row_idx / source_rows][row_idx % source_rows, ...]
+//
+// where
+//
+// - compressed_result[row_idx, ...]
+//     = result[row_idx / result_packing, ..., row_idx % result_packing]
+// - compressed_sources[i][row_idx, ...]
+//     = sources[i][row_idx / source_packing, ..., row_idx % source_packing]
+// - source_rows = sublane_count * source_packing
+//
 // A compressed pack(a, b) from 16-bit values produces:
 //
 //  [ (A000 A001 A100 A101) (A010 A011 A110 A111) ... ]
