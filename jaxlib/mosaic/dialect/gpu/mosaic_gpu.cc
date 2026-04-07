@@ -811,15 +811,6 @@ llvm::LogicalResult AsyncStoreScalesSmemToTmemOp::verify() {
         tmem_shape[1]);
   }
 
-  llvm::ArrayRef<int64_t> smem_shape = source_type.getShape();
-  std::vector<int64_t> expected_smem_shape_vec = {tmem_shape[0] / 128,
-                                                  tmem_shape[1] / 4, 32, 16};
-  llvm::ArrayRef<int64_t> expected_smem_shape(expected_smem_shape_vec);
-  if (smem_shape != expected_smem_shape) {
-    return error("The `source` memref must have shape ({0}), but got ({1}).",
-                 absl::StrJoin(expected_smem_shape, ", "),
-                 absl::StrJoin(smem_shape, ", "));
-  }
   mlir::Attribute smem = mlir::gpu::AddressSpaceAttr::get(
       getContext(), mlir::gpu::AddressSpace::Workgroup);
   if (source_type.getMemorySpace() != smem) {

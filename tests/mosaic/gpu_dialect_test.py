@@ -1470,19 +1470,6 @@ ir.MLIRError,
     ):
       self.module.operation.verify()
 
-  def test_async_store_scales_smem_to_tmem_op_invalid_smem_shape(self):
-    with ir.InsertionPoint(self.module.body):
-      f8e8 = ir.Float8E8M0FNUType.get()
-      smem_ty = ir.MemRefType.get((2, 2, 32, 17), f8e8, memory_space=mgpu_utils.smem())
-      tmem_ty = ir.MemRefType.get((256, 8), f8e8, memory_space=mgpu_utils.tmem())
-      smem, tmem = undefs(smem_ty, tmem_ty)
-      mgpu.dialect.async_store_scales_smem_to_tmem(smem, tmem)
-    with self.assertRaisesRegex(
-        ir.MLIRError,
-        r"The `source` memref must have shape \(2, 2, 32, 16\)",
-    ):
-      self.module.operation.verify()
-
   @parameterized.parameters(ir.Float8E8M0FNUType, ir.Float8E4M3FNType)
   def test_async_store_scales_smem_to_tmem_op_ok(self, valid_dtype):
     f8 = valid_dtype.get()
