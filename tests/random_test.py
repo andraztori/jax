@@ -31,6 +31,7 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax import random
+from jax._src import api
 from jax._src import config
 from jax._src import core
 from jax._src import dispatch
@@ -1002,14 +1003,14 @@ class KeyArrayTest(jtu.JaxTestCase):
   def test_device_put_sharded(self):
     devices = jax.devices()
     keys = self.make_keys(len(devices))
-    keys_on_device = jax.device_put_sharded(list(keys), devices)
+    keys_on_device = api.device_put_sharded(list(keys), devices)
     self.assertKeysEqual(keys, keys_on_device)
 
   @jtu.ignore_warning(category=DeprecationWarning)
   def test_device_put_replicated(self):
     devices = jax.devices()
     key = self.make_keys()
-    keys_on_device = jax.device_put_replicated(key, devices)
+    keys_on_device = api.device_put_replicated(key, devices)
     self.assertKeysEqual(jnp.broadcast_to(key, keys_on_device.shape), keys_on_device)
 
   def test_make_array_from_callback(self):
