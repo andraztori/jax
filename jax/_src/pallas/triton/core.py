@@ -30,3 +30,4 @@ class CompilerParams:
   """
   num_warps: int | None = None
   num_stages: int | None = None
+

@@ -131,6 +131,17 @@ class CompilerParams(Protocol):
   __dataclass_fields__: ClassVar[dict[str, dataclasses.Field[Any]]]
 
 
+_backend_lowering_rules = {}
+
+
+def register_lowering_rule(params_cls, rule):
+  _backend_lowering_rules[params_cls] = rule
+
+
+def get_lowering_rule(params_cls):
+  return _backend_lowering_rules.get(params_cls)
+
+
 @enum.unique
 class RevisitMode(enum.Enum):
   """Specifies whether an output buffer supports revisiting.
