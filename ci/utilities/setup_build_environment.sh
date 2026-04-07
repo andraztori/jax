@@ -49,6 +49,9 @@ if [[ "$JAXCI_CLONE_MAIN_XLA" == 1 ]]; then
   fi
 fi
 
+# Test-only pin, will be reverted before submission.
+export JAXCI_XLA_COMMIT="bcba45863cfcdf8ca99536646b8d36603e17f4c7"
+
 # If a XLA commit is provided, check out XLA at that commit.
 if [[ ! -z "$JAXCI_XLA_COMMIT" ]]; then
   # Clone XLA at HEAD if a path to local XLA is not provided.
