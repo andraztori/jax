@@ -35,6 +35,7 @@ from jax._src.pallas import core as pallas_core
 from jax._src.pallas.mosaic import core as tpu_core
 from jax._src.pallas.mosaic import lowering
 from jax._src.pallas.mosaic import sc_lowering
+from jax._src.pallas.mosaic import tpu_info
 from jax._src.state import types as state_types
 from jax.experimental import mosaic
 from jax.experimental.mosaic.dialects import tpu
@@ -364,6 +365,20 @@ def pallas_call_tpu_lowering_rule(
     assert isinstance(compiler_params, tpu_core.CompilerParams)
     mosaic_params = compiler_params
 
+  info = tpu_info.get_tpu_info()
+  if (
+      mosaic_params.kernel_type
+      in (
+          tpu_core.CoreType.SC_SCALAR_SUBCORE,
+          tpu_core.CoreType.SC_VECTOR_SUBCORE,
+      )
+      and not info.sparse_core
+  ):
+    raise ValueError(
+        "SparseCore is not available on the current device"
+        f" ({info.chip_version}), but the kernel type is set to SparseCore."
+    )
+
   del mesh
   jax_mesh = None
   axis_context = ctx.module_context.axis_context
@@ -474,9 +489,22 @@ def mpmd_map_tpu_lowering_rule(
     for mesh, jaxpr, grid_mapping in zip(
         meshes, jaxprs, grid_mappings, strict=True
     ):
+      info = tpu_info.get_tpu_info()
       if (
-          not hasattr(mesh, "kernel_type") or
-          not hasattr(mesh, "dimension_semantics")
+          mesh.kernel_type
+          in (
+              tpu_core.CoreType.SC_SCALAR_SUBCORE,
+              tpu_core.CoreType.SC_VECTOR_SUBCORE,
+          )
+          and not info.sparse_core
+      ):
+        raise ValueError(
+            "SparseCore is not available on the current device"
+            f" ({info.chip_version}), but the kernel type is set to SparseCore."
+        )
+
+      if not hasattr(mesh, "kernel_type") or not hasattr(
+          mesh, "dimension_semantics"
       ):
         raise ValueError(
             "mpmd_map requires the mesh to define its ``kernel_type`` and"

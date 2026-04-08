@@ -21,13 +21,85 @@ import jax
 from jax import numpy as jnp
 from jax._src import config
 from jax._src import test_util as jtu
+from jax._src.pallas import mpmd
 from jax._src.pallas.mosaic import error_handling
+from jax._src.pallas.mosaic import tpu_info
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import numpy as np
 
 
 config.parse_flags_with_absl()
+
+
+class PallasTpuSparseCoreLoweringErrorTest(jtu.JaxTestCase):
+  """Tests for SparseCore-related errors during Pallas lowering."""
+
+  def setUp(self):
+    super().setUp()
+    if not jtu.test_device_matches(["tpu"]):
+      self.skipTest("Test only works on TPU.")
+
+  def test_sparsecore_availability_check(self):
+    """Checks that SparseCore availability is verified during pallas_call."""
+    has_sc = tpu_info.get_tpu_info().sparse_core is not None
+
+    def pallas_kernel(x_ref, o_ref):
+      o_ref[...] = x_ref[...]
+
+    @jax.jit
+    def kernel(x):
+      return pl.pallas_call(
+          pallas_kernel,
+          out_shape=jax.ShapeDtypeStruct(x.shape, x.dtype),
+          compiler_params=pltpu.CompilerParams(
+              kernel_type=pltpu.CoreType.SC_VECTOR_SUBCORE
+          ),
+      )(x)
+
+    x = jnp.ones((8,), dtype=jnp.float32)
+    if not has_sc:
+      with self.assertRaisesRegex(
+          ValueError, "SparseCore is not available on the current device"
+      ):
+        kernel.lower(x).compile()
+    else:
+      # Should work on devices with SparseCore
+      hlo = kernel.lower(x).as_text("hlo")
+      self.assertIn("custom-call", hlo)
+
+  def test_mpmd_map_sparsecore_availability_check(self):
+    """Checks that SparseCore availability is verified during mpmd_map."""
+    has_sc = tpu_info.get_tpu_info().sparse_core is not None
+
+    # We use a real mesh to carry kernel_type
+    devices = np.array(jax.devices()[:1]).reshape((1,))
+    mesh = jax.sharding.Mesh(devices, ("x",))
+    mesh.kernel_type = pltpu.CoreType.SC_VECTOR_SUBCORE
+    mesh.dimension_semantics = [pltpu.GridDimensionSemantics.PARALLEL]
+    mesh.default_memory_space = pltpu.VMEM
+
+    def kernel_fn(x_ref, o_ref):
+      o_ref[...] = x_ref[...]
+
+    @jax.jit
+    def run_mpmd(x):
+      return mpmd.mpmd_map(
+          [(mesh, kernel_fn)],
+          out_shapes=jax.ShapeDtypeStruct(x.shape, x.dtype),
+      )(x)
+
+    x = jnp.ones((8,), dtype=jnp.float32)
+    if not has_sc:
+      with self.assertRaisesRegex(
+          ValueError, "SparseCore is not available on the current device"
+      ):
+        run_mpmd.lower(x).compile()
+    else:
+      # Should work on devices with SparseCore
+      hlo = run_mpmd.lower(x).as_text("hlo")
+      self.assertIn("custom-call", hlo)
+
 
 LOCATION_TEST_STRING = (
     r'loc("/squeeze"'
@@ -47,7 +119,8 @@ class PallasErrorHandlingTest(jtu.JaxTestCase):
 
   def test_non_singular_stride(self):
     input_arr = jax.random.uniform(
-        jax.random.key(0), (8, 128), dtype=jnp.float32)
+        jax.random.key(0), (8, 128), dtype=jnp.float32
+    )
     out_shape = jax.ShapeDtypeStruct((8, 16), jnp.float32)
     grid_spec = pltpu.PrefetchScalarGridSpec(
         num_scalar_prefetch=0,
@@ -154,8 +227,10 @@ class PallasErrorHandlingTest(jtu.JaxTestCase):
         out_shape=jax.ShapeDtypeStruct(total_shape, dtype),
         in_specs=[x_spec],
         out_specs=x_spec,
-        grid=tuple(tot // blk for tot, blk in zip(total_shape, block_shape,
-                                                  strict=True)),
+        grid=tuple(
+            tot // blk
+            for tot, blk in zip(total_shape, block_shape, strict=True)
+        ),
     )
     with self.assertRaisesRegex(
         ValueError,
